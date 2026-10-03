@@ -56,7 +56,7 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-family: var
 .key .n { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
 .key button[aria-pressed="false"] { opacity: .38; }
 .key button[aria-pressed="false"] .sw { background: transparent !important; }
-.key .boundary .sw { background: transparent; box-shadow: inset 0 0 0 2px var(--ink); border-radius: 0; }
+.key .boundary .sw { border-radius: 2px; }
 .hint { font-size: .8rem; color: var(--muted); margin: 0; line-height: 1.4; }
 .foot { border-top: 1px solid var(--rule); padding-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: .8rem; color: var(--muted); }
 .foot a { color: var(--accent); }
@@ -163,7 +163,7 @@ maplibregl.addProtocol('pmtiles', pmProtocol.tile);
 (async () => {
   const { style, live } = await getStyle();
   ['center', 'zoom', 'pitch', 'bearing'].forEach(k => delete style[k]);
-  const map = new maplibregl.Map({ container: 'map', style, ...VIEW, maxPitch: 75, antialias: true });
+  const map = new maplibregl.Map({ container: 'map', style, ...VIEW, maxPitch: 75, antialias: true, maxBounds: [[-2.370, 53.428], [-2.085, 53.558]] });
   window.map = map;
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
   map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
@@ -173,7 +173,7 @@ maplibregl.addProtocol('pmtiles', pmProtocol.tile);
 
   map.on('load', async () => {
     const get = f => fetch('data/' + f).then(r => r.json());
-    const [b, s, realm, water] = await Promise.all([get('buildings.geojson'), get('site_boundary.geojson'), get('public_realm.geojson'), get('water.geojson')]);
+    const [b, s, realm, water, wall] = await Promise.all([get('buildings.geojson'), get('site_boundary.geojson'), get('public_realm.geojson'), get('water.geojson'), get('site_wall.geojson')]);
     const counts = {};
     b.features.forEach(f => counts[f.properties.use] = (counts[f.properties.use] || 0) + 1);
 
@@ -189,7 +189,6 @@ maplibregl.addProtocol('pmtiles', pmProtocol.tile);
     map.addLayer({ id: 'realm', type: 'fill', source: 'realm', paint: { 'fill-color': ['match', ['get', 'part'], ...REALM.flat(), '#6BAA5E'], 'fill-opacity': .85 } }, firstRoad);
     if (!live) map.addLayer({ id: 'water', type: 'line', source: 'water', paint: { 'line-color': '#4B8BBE', 'line-width': 3 } });
     else map.addLayer({ id: 'water-top', type: 'line', source: 'water', paint: { 'line-color': '#7DA9CC', 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 1.5, 17, 6] } }, firstRoad);
-    map.addLayer({ id: 'site-line', type: 'line', source: 'site', paint: { 'line-color': css('--ink'), 'line-width': 2, 'line-dasharray': [3, 2] } });
 
     // Existing buildings for all of Greater Manchester, from OpenStreetMap, served from our own tile file.
     // s = 1 marks buildings that touch the site boundary; Proposed mode hides them.
@@ -215,6 +214,14 @@ maplibregl.addProtocol('pmtiles', pmProtocol.tile);
         'fill-extrusion-opacity': .93,
         'fill-extrusion-vertical-gradient': true,
       },
+    });
+
+    // Site boundary: a thin raised wall so it reads above streets, labels and the green way.
+    map.addSource('wall', { type: 'geojson', data: wall });
+    map.addLayer({ id: 'site-line', type: 'line', source: 'site', paint: { 'line-color': '#0E6E78', 'line-width': 2.5, 'line-opacity': .9 } });
+    map.addLayer({
+      id: 'site-wall', type: 'fill-extrusion', source: 'wall',
+      paint: { 'fill-extrusion-color': '#0E8A96', 'fill-extrusion-height': 6, 'fill-extrusion-base': 0, 'fill-extrusion-opacity': .95 },
     });
 
     STOPS.forEach(([name, ll]) => {
@@ -250,7 +257,7 @@ maplibregl.addProtocol('pmtiles', pmProtocol.tile);
       map.setLayoutProperty('context-3d', 'visibility', showExisting ? 'visible' : 'none');
       map.setLayoutProperty('site-existing-3d', 'visibility', showExisting && mode === 'today' ? 'visible' : 'none');
     };
-    item('Site boundary', '', '', on => map.setLayoutProperty('site-line', 'visibility', on ? 'visible' : 'none'), 'boundary');
+    item('Site boundary', 'background:#0E8A96', '', on => ['site-line', 'site-wall'].forEach(id => map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none')), 'boundary');
 
     // ---- modes
     const note = document.getElementById('note');
