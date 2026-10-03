@@ -121,6 +121,7 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-family: var
 <button class="reset" id="reset" type="button">Reset view</button>
 
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
 <script>
 const USES = [
   ['Low Density Housing',        '#F2C318'],
@@ -156,8 +157,12 @@ async function getStyle() {
   } catch { return { style: FALLBACK, live: false }; }
 }
 
+const pmProtocol = new pmtiles.Protocol();
+maplibregl.addProtocol('pmtiles', pmProtocol.tile);
+
 (async () => {
   const { style, live } = await getStyle();
+  ['center', 'zoom', 'pitch', 'bearing'].forEach(k => delete style[k]);
   const map = new maplibregl.Map({ container: 'map', style, ...VIEW, maxPitch: 75, antialias: true });
   window.map = map;
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
@@ -181,52 +186,26 @@ async function getStyle() {
     map.addSource('water', { type: 'geojson', data: water });
     map.addSource('b', { type: 'geojson', data: b });
 
-    map.addLayer({ id: 'site-mask', type: 'fill', source: 'site', paint: { 'fill-color': ground, 'fill-opacity': 1 } }, firstRoad);
     map.addLayer({ id: 'realm', type: 'fill', source: 'realm', paint: { 'fill-color': ['match', ['get', 'part'], ...REALM.flat(), '#6BAA5E'], 'fill-opacity': .85 } }, firstRoad);
     if (!live) map.addLayer({ id: 'water', type: 'line', source: 'water', paint: { 'line-color': '#4B8BBE', 'line-width': 3 } });
     else map.addLayer({ id: 'water-top', type: 'line', source: 'water', paint: { 'line-color': '#7DA9CC', 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 1.5, 17, 6] } }, firstRoad);
     map.addLayer({ id: 'site-line', type: 'line', source: 'site', paint: { 'line-color': css('--ink'), 'line-width': 2, 'line-dasharray': [3, 2] } });
 
-    if (live) {
-      map.addLayer({
-        id: 'osm-3d', type: 'fill-extrusion', source: 'openmaptiles', 'source-layer': 'building', minzoom: 13, filter: ['!=', ['get', 'hide_3d'], true],
-        layout: { visibility: 'none' },
-        paint: {
-          'fill-extrusion-color': '#C9CCC8',
-          'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
-          'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-          'fill-extrusion-opacity': .9,
-        },
-      });
-    }
-    // Surrounding 3D buildings for the Proposed view: taken from the live tiles at runtime,
-    // keeping only buildings whose centre lies outside the site boundary.
-    if (live) {
-      const g = s.features[0].geometry;
-      const rings = g.type === 'Polygon' ? [g.coordinates[0]] : g.coordinates.map(p => p[0]);
-      const inSite = (x, y) => rings.some(r => { let c = false; for (let i = 0, j = r.length - 1; i < r.length; j = i++) { const [xi, yi] = r[i], [xj, yj] = r[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; });
-      map.addSource('context', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-      map.addLayer({
-        id: 'context-3d', type: 'fill-extrusion', source: 'context',
-        paint: { 'fill-extrusion-color': '#C9CCC8', 'fill-extrusion-height': ['get', 'h'], 'fill-extrusion-base': ['get', 'b'], 'fill-extrusion-opacity': .9 },
-      });
-      const seen = new Map();
-      const refresh = () => {
-        let added = 0;
-        for (const f of map.querySourceFeatures('openmaptiles', { sourceLayer: 'building' })) {
-          const p = f.properties; if (p.hide_3d) continue;
-          const geom = f.geometry; if (!geom || !/Polygon/.test(geom.type)) continue;
-          const ring = geom.type === 'Polygon' ? geom.coordinates[0] : geom.coordinates[0][0];
-          let x = 0, y = 0; ring.forEach(c => { x += c[0]; y += c[1]; }); x /= ring.length; y /= ring.length;
-          const k = x.toFixed(6) + ',' + y.toFixed(6);
-          if (seen.has(k) || inSite(x, y)) continue;
-          seen.set(k, { type: 'Feature', properties: { h: p.render_height || 6, b: p.render_min_height || 0 }, geometry: geom }); added++;
-        }
-        if (added) map.getSource('context').setData({ type: 'FeatureCollection', features: [...seen.values()] });
-      };
-      let t; map.on('sourcedata', e => { if (e.sourceId === 'openmaptiles' && e.isSourceLoaded) { clearTimeout(t); t = setTimeout(refresh, 250); } });
-      map.once('idle', refresh);
-    }
+    // Existing buildings for all of Greater Manchester, from OpenStreetMap, served from our own tile file.
+    // s = 1 marks buildings that touch the site boundary; Proposed mode hides them.
+    if (live && map.getLayer('building')) map.setLayoutProperty('building', 'visibility', 'none');
+    map.addSource('gm', { type: 'vector', url: 'pmtiles://' + new URL('data/buildings_gm.pmtiles', location.href).href });
+    const exist = (id, filter) => map.addLayer({
+      id, type: 'fill-extrusion', source: 'gm', 'source-layer': 'buildings', filter,
+      paint: {
+        'fill-extrusion-color': '#C9CCC8',
+        'fill-extrusion-height': ['get', 'h'],
+        'fill-extrusion-base': ['get', 'b'],
+        'fill-extrusion-opacity': .9,
+      },
+    });
+    exist('context-3d', ['==', ['get', 's'], 0]);
+    exist('site-existing-3d', ['==', ['get', 's'], 1]);
     map.addLayer({
       id: 'buildings', type: 'fill-extrusion', source: 'b',
       paint: {
@@ -265,7 +244,12 @@ async function getStyle() {
       map.setFilter('realm', ['in', ['get', 'part'], ['literal', shown]]);
     }, 'realm')));
     const hiddenRealm = new Set();
-    const todayItem = item('Existing buildings (OpenStreetMap)', 'background:#C9CCC8', '', on => map.setLayoutProperty('osm-3d', 'visibility', on ? 'visible' : 'none'));
+    let showExisting = true;
+    const existItem = item('Existing buildings (OpenStreetMap)', 'background:#C9CCC8', '', on => { showExisting = on; applyExisting(); });
+    const applyExisting = () => {
+      map.setLayoutProperty('context-3d', 'visibility', showExisting ? 'visible' : 'none');
+      map.setLayoutProperty('site-existing-3d', 'visibility', showExisting && mode === 'today' ? 'visible' : 'none');
+    };
     item('Site boundary', '', '', on => map.setLayoutProperty('site-line', 'visibility', on ? 'visible' : 'none'), 'boundary');
 
     // ---- modes
@@ -275,12 +259,10 @@ async function getStyle() {
       document.getElementById('m-prop').setAttribute('aria-pressed', String(m === 'prop'));
       document.getElementById('m-today').setAttribute('aria-pressed', String(m === 'today'));
       const p = m === 'prop';
-      ['buildings', 'realm', 'site-mask'].forEach(id => map.setLayoutProperty(id, 'visibility', p ? 'visible' : 'none'));
-      if (map.getLayer('osm-3d')) map.setLayoutProperty('osm-3d', 'visibility', p ? 'none' : 'visible');
-      if (map.getLayer('context-3d')) map.setLayoutProperty('context-3d', 'visibility', p ? 'visible' : 'none');
+      ['buildings', 'realm'].forEach(id => map.setLayoutProperty(id, 'visibility', p ? 'visible' : 'none'));
+      applyExisting();
       propItems.forEach(li => li.hidden = !p);
-      todayItem.hidden = p || !live;
-      note.textContent = NOTES[m] + (!p && !live ? ' (Existing buildings appear when the map is viewed online.)' : '');
+      note.textContent = NOTES[m];
       popup.remove();
     };
     document.getElementById('m-prop').onclick = () => setMode('prop');
@@ -296,6 +278,7 @@ async function getStyle() {
     map.on('mouseenter', 'buildings', () => map.getCanvas().style.cursor = 'pointer');
     map.on('mouseleave', 'buildings', () => map.getCanvas().style.cursor = '');
     setMode('prop');
+    map.jumpTo(VIEW);
   });
 
   document.getElementById('reset').addEventListener('click', () =>
